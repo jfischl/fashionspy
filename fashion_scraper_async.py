@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import csv
 import hashlib
+import json
 import logging
 import os
 import sys
@@ -576,6 +577,179 @@ class AsyncHTTPClient:
 
 
 # ============================================================================
+# TASK-19: Site-Specific Configuration System
+# ============================================================================
+
+class SiteConfig:
+    """Manages site-specific configuration for scraping strategies and selectors.
+
+    Loads configuration from JSON file and provides per-site settings for:
+    - Scraping strategy (HTML vs Playwright)
+    - Custom CSS selectors
+    - Rate limits
+    - Detection thresholds
+    - Other site-specific behavior
+    """
+
+    def __init__(self, config_file: Optional[str] = None, logger=None):
+        """Initialize site configuration.
+
+        Args:
+            config_file: Path to JSON configuration file (optional)
+            logger: Logger instance for debug output
+        """
+        self.logger = logger
+        self.config = {}
+
+        if config_file:
+            self.load_config(config_file)
+
+    def load_config(self, config_file: str) -> bool:
+        """Load configuration from JSON file.
+
+        Args:
+            config_file: Path to JSON configuration file
+
+        Returns:
+            True if config loaded successfully, False otherwise
+        """
+        try:
+            config_path = Path(config_file)
+            if not config_path.exists():
+                if self.logger:
+                    self.logger.info(f"Config file not found: {config_file}, using defaults")
+                return False
+
+            with open(config_path, 'r', encoding='utf-8') as f:
+                self.config = json.load(f)
+
+            # Remove schema/comment keys
+            self.config = {k: v for k, v in self.config.items()
+                          if not k.startswith('_')}
+
+            if self.logger:
+                self.logger.info(f"Loaded site configuration for {len(self.config)} domains")
+                self.logger.debug(f"Configured domains: {', '.join(self.config.keys())}")
+
+            return True
+
+        except json.JSONDecodeError as e:
+            if self.logger:
+                self.logger.warning(f"Invalid JSON in config file: {e}")
+            return False
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"Error loading config file: {e}")
+            return False
+
+    def get_site_config(self, url: str) -> Dict:
+        """Get configuration for a specific site based on its URL.
+
+        Args:
+            url: URL to get configuration for
+
+        Returns:
+            Dictionary with site configuration, or empty dict if no config found
+        """
+        # Extract domain from URL
+        parsed = urlparse(url)
+        domain = parsed.netloc
+
+        # Try exact match first
+        if domain in self.config:
+            return self.config[domain]
+
+        # Try without www prefix
+        if domain.startswith('www.'):
+            domain_no_www = domain[4:]
+            if domain_no_www in self.config:
+                return self.config[domain_no_www]
+
+        # Try with www prefix
+        domain_with_www = f"www.{domain}"
+        if domain_with_www in self.config:
+            return self.config[domain_with_www]
+
+        # No config found
+        return {}
+
+    def should_use_playwright(self, url: str) -> bool:
+        """Determine if Playwright should be used for this URL.
+
+        Args:
+            url: URL to check
+
+        Returns:
+            True if Playwright should be used, False otherwise
+        """
+        site_config = self.get_site_config(url)
+        return site_config.get('strategy', 'html').lower() == 'playwright'
+
+    def get_rate_limit(self, url: str, default: float = 2.0) -> float:
+        """Get rate limit for a specific site.
+
+        Args:
+            url: URL to get rate limit for
+            default: Default rate limit if not configured
+
+        Returns:
+            Rate limit in requests per second
+        """
+        site_config = self.get_site_config(url)
+        return site_config.get('rate_limit', default)
+
+    def get_detection_threshold(self, url: str, default: int = 3) -> int:
+        """Get product detection threshold for a specific site.
+
+        Args:
+            url: URL to get threshold for
+            default: Default threshold if not configured
+
+        Returns:
+            Minimum score required for product page detection
+        """
+        site_config = self.get_site_config(url)
+        return site_config.get('detection_threshold', default)
+
+    def get_max_pages(self, url: str, default: int = 20) -> int:
+        """Get maximum pages to scrape for a specific site.
+
+        Args:
+            url: URL to get max pages for
+            default: Default max pages if not configured
+
+        Returns:
+            Maximum number of product pages to scrape
+        """
+        site_config = self.get_site_config(url)
+        return site_config.get('max_pages', default)
+
+    def get_product_selectors(self, url: str) -> Dict[str, str]:
+        """Get custom product selectors for a specific site.
+
+        Args:
+            url: URL to get selectors for
+
+        Returns:
+            Dictionary of CSS selectors for product elements
+        """
+        site_config = self.get_site_config(url)
+        return site_config.get('product_selectors', {})
+
+    def should_scroll_to_load(self, url: str) -> bool:
+        """Determine if page scrolling is needed to trigger lazy loading.
+
+        Args:
+            url: URL to check
+
+        Returns:
+            True if scrolling should be performed, False otherwise
+        """
+        site_config = self.get_site_config(url)
+        return site_config.get('scroll_to_load', False)
+
+
+# ============================================================================
 # TASK-3: Web Crawling Engine for Product Page Discovery (Async)
 # ============================================================================
 
@@ -931,7 +1105,9 @@ class AsyncFashionScraper:
                  max_images: Optional[int] = None,
                  designer_filter: Optional[str] = None,
                  max_concurrent_designers: int = 5,
-                 use_playwright_for: List[str] = None):
+                 use_playwright_for: List[str] = None,
+                 detection_threshold: int = 3,
+                 site_config_file: Optional[str] = None):
         """Initialize the async scraper.
 
         Args:
@@ -944,6 +1120,8 @@ class AsyncFashionScraper:
             designer_filter: Only process this designer by name (None = all designers)
             max_concurrent_designers: Maximum designers to process simultaneously
             use_playwright_for: List of designer names that require Playwright (TASK-17)
+            detection_threshold: Minimum score for product page detection (TASK-18, default: 3)
+            site_config_file: Path to site configuration JSON file (TASK-19, optional)
         """
         self.input_csv = input_csv
         self.output_dir = Path(output_dir)
@@ -953,6 +1131,7 @@ class AsyncFashionScraper:
         self.designer_filter = designer_filter
         self.max_concurrent_designers = max_concurrent_designers
         self.use_playwright_for = [name.lower() for name in (use_playwright_for or [])]
+        self.detection_threshold = detection_threshold
 
         # Initialize components
         self.logger = ScraperLogger(log_dir)
@@ -960,6 +1139,18 @@ class AsyncFashionScraper:
         self.duplicate_detector = DuplicateDetector(self.logger)
         self.rate_limiter = RateLimiter(requests_per_second)
         self.cache = ResponseCache(max_size=1000)
+
+        # TASK-19: Initialize site configuration
+        self.site_config = SiteConfig(site_config_file, self.logger)
+
+        # TASK-18: Initialize content-based product page detector (if available)
+        try:
+            self.detector = ContentBasedDetector(threshold=detection_threshold, logger=self.logger)
+        except NameError:
+            # ContentBasedDetector not available in this version
+            self.detector = None
+            if self.logger:
+                self.logger.debug("ContentBasedDetector not available, using basic detection")
 
         # Async locks for shared resources (TASK-15)
         self.stats_lock = None  # Will be initialized in run()
@@ -1082,8 +1273,14 @@ class AsyncFashionScraper:
             image_downloader: Image downloader instance
             source_logger: Source logger instance
         """
-        # TASK-17: Determine if we should use Playwright for this designer
-        use_playwright = designer_name.lower() in self.use_playwright_for
+        # TASK-17 & TASK-19: Determine if we should use Playwright for this designer
+        # Priority: 1) Site config, 2) Manual --use-playwright argument
+        use_playwright_from_config = self.site_config.should_use_playwright(website_url)
+        use_playwright_from_arg = designer_name.lower() in self.use_playwright_for
+        use_playwright = use_playwright_from_config or use_playwright_from_arg
+
+        if use_playwright_from_config:
+            self.logger.info(f"Site config specifies Playwright for {urlparse(website_url).netloc}")
 
         if use_playwright:
             if not PLAYWRIGHT_AVAILABLE:
@@ -1326,6 +1523,22 @@ Examples:
         help='Designer names that require Playwright for JavaScript rendering (e.g., --use-playwright Gucci Prada)'
     )
 
+    parser.add_argument(
+        '--detection-threshold',
+        type=int,
+        default=3,
+        metavar='N',
+        help='Minimum score for product page detection (TASK-18, default: 3, higher = stricter)'
+    )
+
+    parser.add_argument(
+        '--site-config',
+        type=str,
+        default=None,
+        metavar='FILE',
+        help='Path to site configuration JSON file (TASK-19, default: None - uses defaults)'
+    )
+
     args = parser.parse_args()
 
     # Create scraper with parsed arguments
@@ -1338,7 +1551,9 @@ Examples:
         max_images=args.max_images,
         designer_filter=args.designer,
         max_concurrent_designers=args.concurrent,
-        use_playwright_for=args.use_playwright or []
+        use_playwright_for=args.use_playwright or [],
+        detection_threshold=args.detection_threshold,
+        site_config_file=args.site_config
     )
 
     asyncio.run(scraper.run())

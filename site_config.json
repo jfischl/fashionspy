@@ -1,0 +1,105 @@
+{
+  "_comment": "Site-specific configuration for fashion scraper (TASK-19)",
+  "_schema": {
+    "domain": {
+      "strategy": "html|playwright - Scraping strategy to use",
+      "wait_for": "CSS selector to wait for (Playwright only)",
+      "wait_timeout": "Timeout in milliseconds for wait_for (default: 30000)",
+      "product_selectors": {
+        "price": "CSS selector for price element",
+        "images": "CSS selector for product images",
+        "name": "CSS selector for product name",
+        "description": "CSS selector for product description",
+        "category": "CSS selector for category"
+      },
+      "url_patterns": ["List of URL patterns that indicate product pages"],
+      "rate_limit": "Requests per second for this domain (default: 2.0)",
+      "detection_threshold": "Minimum score for product detection (default: 3)",
+      "max_pages": "Maximum product pages to scrape (default: 20)",
+      "scroll_to_load": "Whether to scroll page to trigger lazy loading (default: false)"
+    }
+  },
+
+  "www.prada.com": {
+    "strategy": "playwright",
+    "wait_for": ".product-grid, .product-detail",
+    "wait_timeout": 40000,
+    "product_selectors": {
+      "price": ".price-value, [class*='price']",
+      "images": ".product-image img, .gallery-image img",
+      "name": "h1.product-title, h1[class*='product']",
+      "description": ".product-description, [class*='description']"
+    },
+    "url_patterns": ["/c/", "/products/"],
+    "rate_limit": 1.5,
+    "detection_threshold": 3,
+    "scroll_to_load": true
+  },
+
+  "www.gucci.com": {
+    "strategy": "playwright",
+    "wait_for": ".product-tile, .product-detail-container",
+    "wait_timeout": 35000,
+    "product_selectors": {
+      "price": ".product-price, [data-test='price']",
+      "images": ".product-image img, .product-gallery img",
+      "name": "h1.product-name, [data-test='product-name']",
+      "category": ".breadcrumb, [class*='category']"
+    },
+    "url_patterns": ["/products/", "/shop/"],
+    "rate_limit": 1.5,
+    "detection_threshold": 3,
+    "scroll_to_load": true
+  },
+
+  "www.chanel.com": {
+    "strategy": "playwright",
+    "wait_for": ".product-item, .product-container",
+    "wait_timeout": 40000,
+    "product_selectors": {
+      "price": ".product-price, [class*='price']",
+      "images": ".product-visual img, .product-image img",
+      "name": ".product-name, h1[class*='product']"
+    },
+    "url_patterns": ["/fashion/", "/accessories/"],
+    "rate_limit": 1.0,
+    "detection_threshold": 4,
+    "scroll_to_load": true
+  },
+
+  "annasui.com": {
+    "strategy": "html",
+    "product_selectors": {
+      "price": ".price, .product-price",
+      "images": ".product-image img, .gallery img",
+      "name": "h1.product-title, .product-name"
+    },
+    "rate_limit": 3.0,
+    "detection_threshold": 2
+  },
+
+  "www.versace.com": {
+    "strategy": "playwright",
+    "wait_for": ".product-grid, .pdp-container",
+    "product_selectors": {
+      "price": ".price-sales, [class*='price']",
+      "images": ".product-image img",
+      "name": ".product-name"
+    },
+    "rate_limit": 2.0,
+    "scroll_to_load": true
+  },
+
+  "us.burberry.com": {
+    "strategy": "playwright",
+    "wait_for": ".product-card, .product-view",
+    "product_selectors": {
+      "price": ".price-value",
+      "images": ".product-image img",
+      "name": ".product-title"
+    },
+    "url_patterns": ["/p/", "/product/"],
+    "rate_limit": 1.5,
+    "scroll_to_load": true
+  }
+}
