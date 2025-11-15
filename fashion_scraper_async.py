@@ -6,6 +6,7 @@ High-performance async implementation with aiohttp for faster concurrent scrapin
 Implements TASK-10 through TASK-14 performance optimizations.
 """
 
+import argparse
 import asyncio
 import csv
 import hashlib
@@ -25,6 +26,13 @@ warnings.filterwarnings('ignore', message='urllib3 v2 only supports OpenSSL')
 
 import aiohttp
 from bs4 import BeautifulSoup
+
+# TASK-17: Import Playwright crawler
+try:
+    from playwright_crawler import PlaywrightCrawler
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
 
 
 # ============================================================================
@@ -919,7 +927,11 @@ class AsyncFashionScraper:
                  output_dir: str = "output",
                  log_dir: str = "logs",
                  max_pages_per_site: int = 100,
-                 requests_per_second: float = 2.0):
+                 requests_per_second: float = 2.0,
+                 max_images: Optional[int] = None,
+                 designer_filter: Optional[str] = None,
+                 max_concurrent_designers: int = 5,
+                 use_playwright_for: List[str] = None):
         """Initialize the async scraper.
 
         Args:
@@ -928,11 +940,19 @@ class AsyncFashionScraper:
             log_dir: Directory for log files
             max_pages_per_site: Maximum product pages to process per site
             requests_per_second: Rate limit per domain
+            max_images: Maximum images to download per designer (None = unlimited)
+            designer_filter: Only process this designer by name (None = all designers)
+            max_concurrent_designers: Maximum designers to process simultaneously
+            use_playwright_for: List of designer names that require Playwright (TASK-17)
         """
         self.input_csv = input_csv
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
         self.max_pages_per_site = max_pages_per_site
+        self.max_images = max_images
+        self.designer_filter = designer_filter
+        self.max_concurrent_designers = max_concurrent_designers
+        self.use_playwright_for = [name.lower() for name in (use_playwright_for or [])]
 
         # Initialize components
         self.logger = ScraperLogger(log_dir)
@@ -940,6 +960,10 @@ class AsyncFashionScraper:
         self.duplicate_detector = DuplicateDetector(self.logger)
         self.rate_limiter = RateLimiter(requests_per_second)
         self.cache = ResponseCache(max_size=1000)
+
+        # Async locks for shared resources (TASK-15)
+        self.stats_lock = None  # Will be initialized in run()
+        self.source_log_lock = None  # Will be initialized in run()
 
         # Statistics
         self.stats = {
@@ -955,12 +979,36 @@ class AsyncFashionScraper:
         self.logger.info("Fashion Image Web Scraper (Async/High-Performance)")
         self.logger.info("=" * 60)
 
+        # Initialize async locks for shared resources (TASK-15)
+        self.stats_lock = asyncio.Lock()
+        self.source_log_lock = asyncio.Lock()
+
         # Read designers list
         designers = self.reader.read_designers()
 
         if not designers:
             self.logger.info("No designers to process. Exiting.")
             return
+
+        # Apply designer filter if specified
+        if self.designer_filter:
+            original_count = len(designers)
+            designers = [d for d in designers
+                        if d['designer_name'].lower() == self.designer_filter.lower()]
+            if not designers:
+                self.logger.info(f"No designer found matching '{self.designer_filter}'. Exiting.")
+                return
+            self.logger.info(f"Filtering to designer: {self.designer_filter} "
+                           f"({len(designers)} of {original_count} total)")
+
+        # Show max images limit if set
+        if self.max_images:
+            self.logger.info(f"Maximum images per designer: {self.max_images}")
+
+        # Show concurrency info (TASK-15)
+        if len(designers) > 1:
+            self.logger.info(f"Processing {len(designers)} designers concurrently "
+                           f"(max {self.max_concurrent_designers} at a time)")
 
         # Initialize HTTP client
         async with AsyncHTTPClient(self.logger, self.rate_limiter, self.cache) as http_client:
@@ -973,30 +1021,43 @@ class AsyncFashionScraper:
             )
             source_logger = ImageSourceLogger(self.output_dir, self.logger)
 
-            # Process each designer
-            for idx, designer in enumerate(designers, 1):
-                self.logger.info(f"\n[{idx}/{len(designers)}] Processing: {designer['designer_name']}")
-                self.logger.info(f"Website: {designer['website_url']}")
+            # TASK-15: Process designers concurrently with semaphore to limit concurrency
+            designer_semaphore = asyncio.Semaphore(self.max_concurrent_designers)
 
-                try:
-                    await self._scrape_designer(
-                        designer['designer_name'],
-                        designer['website_url'],
-                        crawler,
-                        metadata_extractor,
-                        image_extractor,
-                        image_downloader,
-                        source_logger
-                    )
-                except Exception as e:
-                    self.logger.log_error(
-                        designer['designer_name'],
-                        designer['website_url'],
-                        "DesignerProcessingError",
-                        f"Failed to process designer: {str(e)}",
-                        designer['website_url']
-                    )
-                    self.stats['errors_encountered'] += 1
+            async def process_designer_with_semaphore(idx: int, designer: dict):
+                """Process a designer with semaphore control."""
+                async with designer_semaphore:
+                    self.logger.info(f"\n[{idx}/{len(designers)}] Processing: {designer['designer_name']}")
+                    self.logger.info(f"Website: {designer['website_url']}")
+
+                    try:
+                        await self._scrape_designer(
+                            designer['designer_name'],
+                            designer['website_url'],
+                            crawler,
+                            metadata_extractor,
+                            image_extractor,
+                            image_downloader,
+                            source_logger
+                        )
+                    except Exception as e:
+                        self.logger.log_error(
+                            designer['designer_name'],
+                            designer['website_url'],
+                            "DesignerProcessingError",
+                            f"Failed to process designer: {str(e)}",
+                            designer['website_url']
+                        )
+                        # Use lock to safely update shared stats
+                        async with self.stats_lock:
+                            self.stats['errors_encountered'] += 1
+
+            # Launch all designers concurrently
+            tasks = [
+                process_designer_with_semaphore(idx, designer)
+                for idx, designer in enumerate(designers, 1)
+            ]
+            await asyncio.gather(*tasks, return_exceptions=True)
 
             # Store source logger path for summary
             self.source_logger_path = source_logger.log_path
@@ -1021,11 +1082,30 @@ class AsyncFashionScraper:
             image_downloader: Image downloader instance
             source_logger: Source logger instance
         """
-        # Discover product pages
-        self.logger.info("Discovering product pages...")
-        product_pages = await crawler.discover_product_pages(
-            website_url, designer_name, self.max_pages_per_site
-        )
+        # TASK-17: Determine if we should use Playwright for this designer
+        use_playwright = designer_name.lower() in self.use_playwright_for
+
+        if use_playwright:
+            if not PLAYWRIGHT_AVAILABLE:
+                self.logger.log_error(
+                    designer_name, website_url, "PlaywrightUnavailable",
+                    "Playwright requested but not installed. Install with: pip install playwright",
+                    website_url
+                )
+                return
+
+            self.logger.info(f"Using Playwright for JavaScript rendering (designer: {designer_name})")
+            # Use Playwright crawler for JavaScript-rendered sites
+            async with PlaywrightCrawler(self.logger) as pw_crawler:
+                product_pages = await pw_crawler.discover_product_pages(
+                    website_url, designer_name, self.max_pages_per_site
+                )
+        else:
+            # Use regular HTML crawler
+            self.logger.info("Discovering product pages...")
+            product_pages = await crawler.discover_product_pages(
+                website_url, designer_name, self.max_pages_per_site
+            )
 
         if not product_pages:
             self.logger.info("No product pages found")
@@ -1086,27 +1166,41 @@ class AsyncFashionScraper:
             page_duplicates = 0
 
             for img, result in zip(images, download_results):
+                # Check if we've hit the max images limit (use lock for thread-safe read)
+                async with self.stats_lock:
+                    if self.max_images and self.stats['images_downloaded'] >= self.max_images:
+                        self.logger.info(f"    Reached max images limit ({self.max_images})")
+                        return
+
                 if isinstance(result, dict) and result:
                     # Image downloaded successfully
-                    await source_logger.log_image(
-                        source_url=page_url,
-                        designer_name=designer_name,
-                        metadata=metadata,
-                        image_url=img['url'],
-                        local_filename=result['filename']
-                    )
+                    # Use source_log_lock to protect source logger writes (TASK-15)
+                    async with self.source_log_lock:
+                        await source_logger.log_image(
+                            source_url=page_url,
+                            designer_name=designer_name,
+                            metadata=metadata,
+                            image_url=img['url'],
+                            local_filename=result['filename']
+                        )
                     page_downloaded += 1
-                    self.stats['images_downloaded'] += 1
+                    async with self.stats_lock:
+                        self.stats['images_downloaded'] += 1
                 else:
                     # Duplicate or failed
                     page_duplicates += 1
-                    self.stats['duplicates_skipped'] += 1
+                    async with self.stats_lock:
+                        self.stats['duplicates_skipped'] += 1
 
+            # Read stats with lock for display
+            async with self.stats_lock:
+                total_images = self.stats['images_downloaded']
             self.logger.info(
                 f"    Downloaded: {page_downloaded}, Skipped: {page_duplicates} "
-                f"(Total: {self.stats['images_downloaded']} images)"
+                f"(Total: {total_images} images)"
             )
-            self.stats['product_pages_processed'] += 1
+            async with self.stats_lock:
+                self.stats['product_pages_processed'] += 1
 
         except Exception as e:
             self.logger.log_error(
@@ -1116,7 +1210,8 @@ class AsyncFashionScraper:
                 f"Error processing page: {str(e)}",
                 page_url
             )
-            self.stats['errors_encountered'] += 1
+            async with self.stats_lock:
+                self.stats['errors_encountered'] += 1
 
     def _print_summary(self):
         """Print final summary statistics."""
@@ -1138,14 +1233,114 @@ class AsyncFashionScraper:
 # ============================================================================
 
 def main():
-    """Main entry point for the async scraper."""
-    scraper = AsyncFashionScraper(
-        input_csv="designers.csv",
-        output_dir="output",
-        log_dir="logs",
-        max_pages_per_site=20,
-        requests_per_second=2.0  # 2 requests per second per domain
+    """Main entry point for the async scraper with CLI argument parsing."""
+    parser = argparse.ArgumentParser(
+        description='Fashion Image Web Scraper - High-performance async version',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  # Scrape all designers, unlimited images
+  python fashion_scraper_async.py
+
+  # Scrape all designers, max 100 images each (for testing)
+  python fashion_scraper_async.py --max-images 100
+
+  # Scrape only Gucci, unlimited images
+  python fashion_scraper_async.py --designer Gucci
+
+  # Scrape only Anna Sui, max 50 images
+  python fashion_scraper_async.py --designer "Anna Sui" --max-images 50
+
+  # Scrape all designers with 10 concurrent at a time
+  python fashion_scraper_async.py --concurrent 10
+
+  # Use Playwright for JavaScript-rendered luxury sites
+  python fashion_scraper_async.py --use-playwright Gucci Prada --max-images 50
+
+  # Custom input/output paths
+  python fashion_scraper_async.py --input mydesigners.csv --output myimages/
+        '''
     )
+
+    parser.add_argument(
+        '--max-images',
+        type=int,
+        default=None,
+        metavar='N',
+        help='Maximum number of images to download per designer (default: unlimited)'
+    )
+
+    parser.add_argument(
+        '--designer',
+        type=str,
+        default=None,
+        metavar='NAME',
+        help='Process only the specified designer by name (default: process all)'
+    )
+
+    parser.add_argument(
+        '--input',
+        type=str,
+        default='designers.csv',
+        metavar='FILE',
+        help='Path to designers CSV file (default: designers.csv)'
+    )
+
+    parser.add_argument(
+        '--output',
+        type=str,
+        default='output',
+        metavar='DIR',
+        help='Output directory for images (default: output/)'
+    )
+
+    parser.add_argument(
+        '--max-pages',
+        type=int,
+        default=20,
+        metavar='N',
+        help='Maximum product pages to process per site (default: 20)'
+    )
+
+    parser.add_argument(
+        '--rate-limit',
+        type=float,
+        default=2.0,
+        metavar='N',
+        help='Requests per second per domain (default: 2.0)'
+    )
+
+    parser.add_argument(
+        '--concurrent',
+        type=int,
+        default=5,
+        metavar='N',
+        help='Maximum designers to process concurrently (default: 5)'
+    )
+
+    parser.add_argument(
+        '--use-playwright',
+        type=str,
+        nargs='*',
+        metavar='DESIGNER',
+        help='Designer names that require Playwright for JavaScript rendering (e.g., --use-playwright Gucci Prada)'
+    )
+
+    args = parser.parse_args()
+
+    # Create scraper with parsed arguments
+    scraper = AsyncFashionScraper(
+        input_csv=args.input,
+        output_dir=args.output,
+        log_dir="logs",
+        max_pages_per_site=args.max_pages,
+        requests_per_second=args.rate_limit,
+        max_images=args.max_images,
+        designer_filter=args.designer,
+        max_concurrent_designers=args.concurrent,
+        use_playwright_for=args.use_playwright or []
+    )
+
     asyncio.run(scraper.run())
 
 
