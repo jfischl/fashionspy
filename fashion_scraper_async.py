@@ -129,6 +129,10 @@ class ScraperLogger:
         """Log a debug message."""
         self.logger.debug(message)
 
+    def warning(self, message: str):
+        """Log a warning message."""
+        self.logger.warning(message)
+
 
 # ============================================================================
 # TASK-1: CSV Input Processing for Designers List
@@ -783,8 +787,12 @@ class SiteConfig:
         product_urls = []
 
         try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+                'Accept': 'application/xml,text/xml,*/*'
+            }
             async with aiohttp.ClientSession() as session:
-                async with session.get(sitemap_url, timeout=aiohttp.ClientTimeout(total=15)) as response:
+                async with session.get(sitemap_url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as response:
                     if response.status == 200:
                         xml_content = await response.text()
                         soup = BeautifulSoup(xml_content, 'xml')

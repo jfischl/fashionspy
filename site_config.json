@@ -21,19 +21,31 @@
   },
 
   "www.prada.com": {
-    "strategy": "playwright",
-    "wait_for": ".product-grid, .product-detail",
-    "wait_timeout": 40000,
+    "strategy": "html",
+    "product_sitemap": "https://www.prada.com/sitemap_product_US_en_0.xml",
     "product_selectors": {
       "price": ".price-value, [class*='price']",
       "images": ".product-image img, .gallery-image img",
       "name": "h1.product-title, h1[class*='product']",
       "description": ".product-description, [class*='description']"
     },
-    "url_patterns": ["/c/", "/products/"],
-    "rate_limit": 1.5,
-    "detection_threshold": 3,
-    "scroll_to_load": true
+    "url_patterns": ["/p/"],
+    "rate_limit": 2.0,
+    "detection_threshold": 3
+  },
+
+  "www.alexanderwang.com": {
+    "strategy": "html",
+    "product_sitemap": "https://www.alexanderwang.com/s/NA/sitemap_0-product.xml",
+    "product_selectors": {
+      "price": ".price, [class*='price']",
+      "images": ".product-image img, .gallery-image img",
+      "name": "h1.product-name, h1[class*='product']",
+      "description": ".product-description, [class*='description']"
+    },
+    "url_patterns": [".html"],
+    "rate_limit": 2.0,
+    "detection_threshold": 3
   },
 
   "www.gucci.com": {
@@ -64,6 +76,21 @@
     "url_patterns": ["/fashion/", "/accessories/"],
     "rate_limit": 1.0,
     "detection_threshold": 4,
+    "scroll_to_load": true
+  },
+
+  "www.stellamccartney.com": {
+    "strategy": "playwright",
+    "wait_for": ".product-tile, .product-card",
+    "wait_timeout": 30000,
+    "product_selectors": {
+      "price": ".price, [class*='price']",
+      "images": ".product-image img, .gallery img",
+      "name": "h1.product-name, .product-title"
+    },
+    "url_patterns": ["/p/", "/product/", "/women", "/men", "/shop", "/bags", "/shoes", "/clothing", "/accessories"],
+    "rate_limit": 2.0,
+    "detection_threshold": 3,
     "scroll_to_load": true
   },
 
@@ -100,6 +127,54 @@
     },
     "url_patterns": ["/p/", "/product/"],
     "rate_limit": 1.5,
+    "scroll_to_load": true
+  },
+
+  "www.betseyjohnson.com": {
+    "strategy": "playwright",
+    "product_sitemap": "https://betseyjohnson.com/sitemap_products_1.xml?from=4596024770625&to=7706392756289",
+    "wait_for": ".product-item, .product-card, .grid-product",
+    "wait_timeout": 30000,
+    "product_selectors": {
+      "price": ".price, .product-price, [class*='price']",
+      "images": ".product-image img, .grid-product__image img",
+      "name": ".product-title, h1.product-name"
+    },
+    "url_patterns": ["/products/", "/collections/"],
+    "rate_limit": 2.0,
+    "detection_threshold": 2,
+    "scroll_to_load": true
+  },
+
+  "karenkane.com": {
+    "strategy": "playwright",
+    "product_sitemap": "https://www.karenkane.com/sitemap_products_1.xml?from=7000987926714&to=8258890891450",
+    "wait_for": ".product-item, .product-card, .grid-item",
+    "wait_timeout": 30000,
+    "product_selectors": {
+      "price": ".price, .product-price",
+      "images": ".product-image img, .grid-item__image img",
+      "name": ".product-title, h1.product-name"
+    },
+    "url_patterns": ["/products/", "/collections/"],
+    "rate_limit": 2.0,
+    "detection_threshold": 2,
+    "scroll_to_load": true
+  },
+
+  "jennikayne.com": {
+    "strategy": "playwright",
+    "product_sitemap": "https://www.jennikayne.com/sitemap_products_1.xml?from=6878848680109&to=8394498670765",
+    "wait_for": ".product-item, .product-card, .grid-product",
+    "wait_timeout": 30000,
+    "product_selectors": {
+      "price": ".price, .product-price, [class*='price']",
+      "images": ".product-image img, .grid-product__image img",
+      "name": ".product-title, h1.product-name"
+    },
+    "url_patterns": ["/products/", "/collections/"],
+    "rate_limit": 2.0,
+    "detection_threshold": 2,
     "scroll_to_load": true
   }
 }
