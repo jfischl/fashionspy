@@ -27,6 +27,13 @@ warnings.filterwarnings('ignore', message='urllib3 v2 only supports OpenSSL')
 import aiohttp
 from bs4 import BeautifulSoup
 
+# TASK-17: Import Playwright crawler
+try:
+    from playwright_crawler import PlaywrightCrawler
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
+
 
 # ============================================================================
 # TASK-2: Error Handling and Logging Framework
@@ -923,7 +930,8 @@ class AsyncFashionScraper:
                  requests_per_second: float = 2.0,
                  max_images: Optional[int] = None,
                  designer_filter: Optional[str] = None,
-                 max_concurrent_designers: int = 5):
+                 max_concurrent_designers: int = 5,
+                 use_playwright_for: List[str] = None):
         """Initialize the async scraper.
 
         Args:
@@ -935,6 +943,7 @@ class AsyncFashionScraper:
             max_images: Maximum images to download per designer (None = unlimited)
             designer_filter: Only process this designer by name (None = all designers)
             max_concurrent_designers: Maximum designers to process simultaneously
+            use_playwright_for: List of designer names that require Playwright (TASK-17)
         """
         self.input_csv = input_csv
         self.output_dir = Path(output_dir)
@@ -943,6 +952,7 @@ class AsyncFashionScraper:
         self.max_images = max_images
         self.designer_filter = designer_filter
         self.max_concurrent_designers = max_concurrent_designers
+        self.use_playwright_for = [name.lower() for name in (use_playwright_for or [])]
 
         # Initialize components
         self.logger = ScraperLogger(log_dir)
@@ -1072,11 +1082,30 @@ class AsyncFashionScraper:
             image_downloader: Image downloader instance
             source_logger: Source logger instance
         """
-        # Discover product pages
-        self.logger.info("Discovering product pages...")
-        product_pages = await crawler.discover_product_pages(
-            website_url, designer_name, self.max_pages_per_site
-        )
+        # TASK-17: Determine if we should use Playwright for this designer
+        use_playwright = designer_name.lower() in self.use_playwright_for
+
+        if use_playwright:
+            if not PLAYWRIGHT_AVAILABLE:
+                self.logger.log_error(
+                    designer_name, website_url, "PlaywrightUnavailable",
+                    "Playwright requested but not installed. Install with: pip install playwright",
+                    website_url
+                )
+                return
+
+            self.logger.info(f"Using Playwright for JavaScript rendering (designer: {designer_name})")
+            # Use Playwright crawler for JavaScript-rendered sites
+            async with PlaywrightCrawler(self.logger) as pw_crawler:
+                product_pages = await pw_crawler.discover_product_pages(
+                    website_url, designer_name, self.max_pages_per_site
+                )
+        else:
+            # Use regular HTML crawler
+            self.logger.info("Discovering product pages...")
+            product_pages = await crawler.discover_product_pages(
+                website_url, designer_name, self.max_pages_per_site
+            )
 
         if not product_pages:
             self.logger.info("No product pages found")
@@ -1225,6 +1254,9 @@ Examples:
   # Scrape all designers with 10 concurrent at a time
   python fashion_scraper_async.py --concurrent 10
 
+  # Use Playwright for JavaScript-rendered luxury sites
+  python fashion_scraper_async.py --use-playwright Gucci Prada --max-images 50
+
   # Custom input/output paths
   python fashion_scraper_async.py --input mydesigners.csv --output myimages/
         '''
@@ -1286,6 +1318,14 @@ Examples:
         help='Maximum designers to process concurrently (default: 5)'
     )
 
+    parser.add_argument(
+        '--use-playwright',
+        type=str,
+        nargs='*',
+        metavar='DESIGNER',
+        help='Designer names that require Playwright for JavaScript rendering (e.g., --use-playwright Gucci Prada)'
+    )
+
     args = parser.parse_args()
 
     # Create scraper with parsed arguments
@@ -1297,7 +1337,8 @@ Examples:
         requests_per_second=args.rate_limit,
         max_images=args.max_images,
         designer_filter=args.designer,
-        max_concurrent_designers=args.concurrent
+        max_concurrent_designers=args.concurrent,
+        use_playwright_for=args.use_playwright or []
     )
 
     asyncio.run(scraper.run())

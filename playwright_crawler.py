@@ -82,10 +82,22 @@ class PlaywrightCrawler:
                     # Navigate and wait for page to load
                     await page.goto(url, wait_until='networkidle', timeout=30000)
 
-                    # Wait a bit for dynamic content
-                    await asyncio.sleep(2)
+                    # TASK-17: Scroll to trigger lazy-load content
+                    try:
+                        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                        await asyncio.sleep(1)  # Wait for content to load
+                        await page.evaluate("window.scrollTo(0, 0)")  # Scroll back up
+                        await asyncio.sleep(1)
+                    except Exception as scroll_error:
+                        self.logger.debug(f"Scrolling failed for {url}: {scroll_error}")
 
-                    # Get page content after JavaScript execution
+                    # Wait for network to stabilize after scrolling
+                    try:
+                        await page.wait_for_load_state('networkidle', timeout=10000)
+                    except Exception:
+                        pass  # Continue even if network doesn't stabilize
+
+                    # Get page content after JavaScript execution and scrolling
                     content = await page.content()
                     soup = BeautifulSoup(content, 'lxml')
 
