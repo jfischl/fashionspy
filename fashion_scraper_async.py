@@ -922,7 +922,8 @@ class AsyncFashionScraper:
                  max_pages_per_site: int = 100,
                  requests_per_second: float = 2.0,
                  max_images: Optional[int] = None,
-                 designer_filter: Optional[str] = None):
+                 designer_filter: Optional[str] = None,
+                 max_concurrent_designers: int = 5):
         """Initialize the async scraper.
 
         Args:
@@ -933,6 +934,7 @@ class AsyncFashionScraper:
             requests_per_second: Rate limit per domain
             max_images: Maximum images to download per designer (None = unlimited)
             designer_filter: Only process this designer by name (None = all designers)
+            max_concurrent_designers: Maximum designers to process simultaneously
         """
         self.input_csv = input_csv
         self.output_dir = Path(output_dir)
@@ -940,6 +942,7 @@ class AsyncFashionScraper:
         self.max_pages_per_site = max_pages_per_site
         self.max_images = max_images
         self.designer_filter = designer_filter
+        self.max_concurrent_designers = max_concurrent_designers
 
         # Initialize components
         self.logger = ScraperLogger(log_dir)
@@ -947,6 +950,10 @@ class AsyncFashionScraper:
         self.duplicate_detector = DuplicateDetector(self.logger)
         self.rate_limiter = RateLimiter(requests_per_second)
         self.cache = ResponseCache(max_size=1000)
+
+        # Async locks for shared resources (TASK-15)
+        self.stats_lock = None  # Will be initialized in run()
+        self.source_log_lock = None  # Will be initialized in run()
 
         # Statistics
         self.stats = {
@@ -961,6 +968,10 @@ class AsyncFashionScraper:
         self.logger.info("=" * 60)
         self.logger.info("Fashion Image Web Scraper (Async/High-Performance)")
         self.logger.info("=" * 60)
+
+        # Initialize async locks for shared resources (TASK-15)
+        self.stats_lock = asyncio.Lock()
+        self.source_log_lock = asyncio.Lock()
 
         # Read designers list
         designers = self.reader.read_designers()
@@ -984,6 +995,11 @@ class AsyncFashionScraper:
         if self.max_images:
             self.logger.info(f"Maximum images per designer: {self.max_images}")
 
+        # Show concurrency info (TASK-15)
+        if len(designers) > 1:
+            self.logger.info(f"Processing {len(designers)} designers concurrently "
+                           f"(max {self.max_concurrent_designers} at a time)")
+
         # Initialize HTTP client
         async with AsyncHTTPClient(self.logger, self.rate_limiter, self.cache) as http_client:
             # Initialize scraping components
@@ -995,30 +1011,43 @@ class AsyncFashionScraper:
             )
             source_logger = ImageSourceLogger(self.output_dir, self.logger)
 
-            # Process each designer
-            for idx, designer in enumerate(designers, 1):
-                self.logger.info(f"\n[{idx}/{len(designers)}] Processing: {designer['designer_name']}")
-                self.logger.info(f"Website: {designer['website_url']}")
+            # TASK-15: Process designers concurrently with semaphore to limit concurrency
+            designer_semaphore = asyncio.Semaphore(self.max_concurrent_designers)
 
-                try:
-                    await self._scrape_designer(
-                        designer['designer_name'],
-                        designer['website_url'],
-                        crawler,
-                        metadata_extractor,
-                        image_extractor,
-                        image_downloader,
-                        source_logger
-                    )
-                except Exception as e:
-                    self.logger.log_error(
-                        designer['designer_name'],
-                        designer['website_url'],
-                        "DesignerProcessingError",
-                        f"Failed to process designer: {str(e)}",
-                        designer['website_url']
-                    )
-                    self.stats['errors_encountered'] += 1
+            async def process_designer_with_semaphore(idx: int, designer: dict):
+                """Process a designer with semaphore control."""
+                async with designer_semaphore:
+                    self.logger.info(f"\n[{idx}/{len(designers)}] Processing: {designer['designer_name']}")
+                    self.logger.info(f"Website: {designer['website_url']}")
+
+                    try:
+                        await self._scrape_designer(
+                            designer['designer_name'],
+                            designer['website_url'],
+                            crawler,
+                            metadata_extractor,
+                            image_extractor,
+                            image_downloader,
+                            source_logger
+                        )
+                    except Exception as e:
+                        self.logger.log_error(
+                            designer['designer_name'],
+                            designer['website_url'],
+                            "DesignerProcessingError",
+                            f"Failed to process designer: {str(e)}",
+                            designer['website_url']
+                        )
+                        # Use lock to safely update shared stats
+                        async with self.stats_lock:
+                            self.stats['errors_encountered'] += 1
+
+            # Launch all designers concurrently
+            tasks = [
+                process_designer_with_semaphore(idx, designer)
+                for idx, designer in enumerate(designers, 1)
+            ]
+            await asyncio.gather(*tasks, return_exceptions=True)
 
             # Store source logger path for summary
             self.source_logger_path = source_logger.log_path
@@ -1108,32 +1137,41 @@ class AsyncFashionScraper:
             page_duplicates = 0
 
             for img, result in zip(images, download_results):
-                # Check if we've hit the max images limit
-                if self.max_images and self.stats['images_downloaded'] >= self.max_images:
-                    self.logger.info(f"    Reached max images limit ({self.max_images})")
-                    return
+                # Check if we've hit the max images limit (use lock for thread-safe read)
+                async with self.stats_lock:
+                    if self.max_images and self.stats['images_downloaded'] >= self.max_images:
+                        self.logger.info(f"    Reached max images limit ({self.max_images})")
+                        return
 
                 if isinstance(result, dict) and result:
                     # Image downloaded successfully
-                    await source_logger.log_image(
-                        source_url=page_url,
-                        designer_name=designer_name,
-                        metadata=metadata,
-                        image_url=img['url'],
-                        local_filename=result['filename']
-                    )
+                    # Use source_log_lock to protect source logger writes (TASK-15)
+                    async with self.source_log_lock:
+                        await source_logger.log_image(
+                            source_url=page_url,
+                            designer_name=designer_name,
+                            metadata=metadata,
+                            image_url=img['url'],
+                            local_filename=result['filename']
+                        )
                     page_downloaded += 1
-                    self.stats['images_downloaded'] += 1
+                    async with self.stats_lock:
+                        self.stats['images_downloaded'] += 1
                 else:
                     # Duplicate or failed
                     page_duplicates += 1
-                    self.stats['duplicates_skipped'] += 1
+                    async with self.stats_lock:
+                        self.stats['duplicates_skipped'] += 1
 
+            # Read stats with lock for display
+            async with self.stats_lock:
+                total_images = self.stats['images_downloaded']
             self.logger.info(
                 f"    Downloaded: {page_downloaded}, Skipped: {page_duplicates} "
-                f"(Total: {self.stats['images_downloaded']} images)"
+                f"(Total: {total_images} images)"
             )
-            self.stats['product_pages_processed'] += 1
+            async with self.stats_lock:
+                self.stats['product_pages_processed'] += 1
 
         except Exception as e:
             self.logger.log_error(
@@ -1143,7 +1181,8 @@ class AsyncFashionScraper:
                 f"Error processing page: {str(e)}",
                 page_url
             )
-            self.stats['errors_encountered'] += 1
+            async with self.stats_lock:
+                self.stats['errors_encountered'] += 1
 
     def _print_summary(self):
         """Print final summary statistics."""
@@ -1182,6 +1221,9 @@ Examples:
 
   # Scrape only Anna Sui, max 50 images
   python fashion_scraper_async.py --designer "Anna Sui" --max-images 50
+
+  # Scrape all designers with 10 concurrent at a time
+  python fashion_scraper_async.py --concurrent 10
 
   # Custom input/output paths
   python fashion_scraper_async.py --input mydesigners.csv --output myimages/
@@ -1236,6 +1278,14 @@ Examples:
         help='Requests per second per domain (default: 2.0)'
     )
 
+    parser.add_argument(
+        '--concurrent',
+        type=int,
+        default=5,
+        metavar='N',
+        help='Maximum designers to process concurrently (default: 5)'
+    )
+
     args = parser.parse_args()
 
     # Create scraper with parsed arguments
@@ -1246,7 +1296,8 @@ Examples:
         max_pages_per_site=args.max_pages,
         requests_per_second=args.rate_limit,
         max_images=args.max_images,
-        designer_filter=args.designer
+        designer_filter=args.designer,
+        max_concurrent_designers=args.concurrent
     )
 
     asyncio.run(scraper.run())
