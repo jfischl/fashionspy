@@ -6,6 +6,7 @@ High-performance async implementation with aiohttp for faster concurrent scrapin
 Implements TASK-10 through TASK-14 performance optimizations.
 """
 
+import argparse
 import asyncio
 import csv
 import hashlib
@@ -919,7 +920,9 @@ class AsyncFashionScraper:
                  output_dir: str = "output",
                  log_dir: str = "logs",
                  max_pages_per_site: int = 100,
-                 requests_per_second: float = 2.0):
+                 requests_per_second: float = 2.0,
+                 max_images: Optional[int] = None,
+                 designer_filter: Optional[str] = None):
         """Initialize the async scraper.
 
         Args:
@@ -928,11 +931,15 @@ class AsyncFashionScraper:
             log_dir: Directory for log files
             max_pages_per_site: Maximum product pages to process per site
             requests_per_second: Rate limit per domain
+            max_images: Maximum images to download per designer (None = unlimited)
+            designer_filter: Only process this designer by name (None = all designers)
         """
         self.input_csv = input_csv
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
         self.max_pages_per_site = max_pages_per_site
+        self.max_images = max_images
+        self.designer_filter = designer_filter
 
         # Initialize components
         self.logger = ScraperLogger(log_dir)
@@ -961,6 +968,21 @@ class AsyncFashionScraper:
         if not designers:
             self.logger.info("No designers to process. Exiting.")
             return
+
+        # Apply designer filter if specified
+        if self.designer_filter:
+            original_count = len(designers)
+            designers = [d for d in designers
+                        if d['designer_name'].lower() == self.designer_filter.lower()]
+            if not designers:
+                self.logger.info(f"No designer found matching '{self.designer_filter}'. Exiting.")
+                return
+            self.logger.info(f"Filtering to designer: {self.designer_filter} "
+                           f"({len(designers)} of {original_count} total)")
+
+        # Show max images limit if set
+        if self.max_images:
+            self.logger.info(f"Maximum images per designer: {self.max_images}")
 
         # Initialize HTTP client
         async with AsyncHTTPClient(self.logger, self.rate_limiter, self.cache) as http_client:
@@ -1086,6 +1108,11 @@ class AsyncFashionScraper:
             page_duplicates = 0
 
             for img, result in zip(images, download_results):
+                # Check if we've hit the max images limit
+                if self.max_images and self.stats['images_downloaded'] >= self.max_images:
+                    self.logger.info(f"    Reached max images limit ({self.max_images})")
+                    return
+
                 if isinstance(result, dict) and result:
                     # Image downloaded successfully
                     await source_logger.log_image(
@@ -1138,14 +1165,90 @@ class AsyncFashionScraper:
 # ============================================================================
 
 def main():
-    """Main entry point for the async scraper."""
-    scraper = AsyncFashionScraper(
-        input_csv="designers.csv",
-        output_dir="output",
-        log_dir="logs",
-        max_pages_per_site=20,
-        requests_per_second=2.0  # 2 requests per second per domain
+    """Main entry point for the async scraper with CLI argument parsing."""
+    parser = argparse.ArgumentParser(
+        description='Fashion Image Web Scraper - High-performance async version',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  # Scrape all designers, unlimited images
+  python fashion_scraper_async.py
+
+  # Scrape all designers, max 100 images each (for testing)
+  python fashion_scraper_async.py --max-images 100
+
+  # Scrape only Gucci, unlimited images
+  python fashion_scraper_async.py --designer Gucci
+
+  # Scrape only Anna Sui, max 50 images
+  python fashion_scraper_async.py --designer "Anna Sui" --max-images 50
+
+  # Custom input/output paths
+  python fashion_scraper_async.py --input mydesigners.csv --output myimages/
+        '''
     )
+
+    parser.add_argument(
+        '--max-images',
+        type=int,
+        default=None,
+        metavar='N',
+        help='Maximum number of images to download per designer (default: unlimited)'
+    )
+
+    parser.add_argument(
+        '--designer',
+        type=str,
+        default=None,
+        metavar='NAME',
+        help='Process only the specified designer by name (default: process all)'
+    )
+
+    parser.add_argument(
+        '--input',
+        type=str,
+        default='designers.csv',
+        metavar='FILE',
+        help='Path to designers CSV file (default: designers.csv)'
+    )
+
+    parser.add_argument(
+        '--output',
+        type=str,
+        default='output',
+        metavar='DIR',
+        help='Output directory for images (default: output/)'
+    )
+
+    parser.add_argument(
+        '--max-pages',
+        type=int,
+        default=20,
+        metavar='N',
+        help='Maximum product pages to process per site (default: 20)'
+    )
+
+    parser.add_argument(
+        '--rate-limit',
+        type=float,
+        default=2.0,
+        metavar='N',
+        help='Requests per second per domain (default: 2.0)'
+    )
+
+    args = parser.parse_args()
+
+    # Create scraper with parsed arguments
+    scraper = AsyncFashionScraper(
+        input_csv=args.input,
+        output_dir=args.output,
+        log_dir="logs",
+        max_pages_per_site=args.max_pages,
+        requests_per_second=args.rate_limit,
+        max_images=args.max_images,
+        designer_filter=args.designer
+    )
+
     asyncio.run(scraper.run())
 
 
