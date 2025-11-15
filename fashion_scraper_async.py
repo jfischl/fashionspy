@@ -35,6 +35,13 @@ try:
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
+# TASK-20: Import person detection filter
+try:
+    from person_filter import PersonDetectionFilter
+    PERSON_FILTER_AVAILABLE = True
+except ImportError:
+    PERSON_FILTER_AVAILABLE = False
+
 
 # ============================================================================
 # TASK-2: Error Handling and Logging Framework
@@ -748,6 +755,60 @@ class SiteConfig:
         site_config = self.get_site_config(url)
         return site_config.get('scroll_to_load', False)
 
+    def get_product_sitemap(self, url: str) -> Optional[str]:
+        """Get product sitemap URL for a specific site.
+
+        Args:
+            url: URL to get sitemap for
+
+        Returns:
+            Sitemap URL if configured, None otherwise
+        """
+        site_config = self.get_site_config(url)
+        return site_config.get('product_sitemap')
+
+    async def fetch_sitemap_products(self, sitemap_url: str, max_products: int = 20) -> List[str]:
+        """Fetch product URLs from a sitemap.
+
+        Args:
+            sitemap_url: URL of the product sitemap
+            max_products: Maximum number of product URLs to return
+
+        Returns:
+            List of product page URLs from the sitemap
+        """
+        import aiohttp
+        from bs4 import BeautifulSoup
+
+        product_urls = []
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(sitemap_url, timeout=aiohttp.ClientTimeout(total=15)) as response:
+                    if response.status == 200:
+                        xml_content = await response.text()
+                        soup = BeautifulSoup(xml_content, 'xml')
+
+                        # Find all <url> elements, then get the first <loc> child (product page URL)
+                        # This avoids accidentally including <image:loc> elements
+                        urls = soup.find_all('url')
+                        for url_elem in urls[:max_products]:
+                            loc = url_elem.find('loc', recursive=False)  # Only direct children
+                            if loc:
+                                product_urls.append(loc.text.strip())
+
+                        if self.logger:
+                            self.logger.info(f"Fetched {len(product_urls)} product URLs from sitemap")
+                    else:
+                        if self.logger:
+                            self.logger.warning(f"Failed to fetch sitemap: HTTP {response.status}")
+
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"Error fetching sitemap {sitemap_url}: {e}")
+
+        return product_urls
+
 
 # ============================================================================
 # TASK-3: Web Crawling Engine for Product Page Discovery (Async)
@@ -903,6 +964,26 @@ class AsyncImageExtractor:
                     'source_page': url
                 })
 
+        # TASK-19: Fallback for JavaScript-rendered sites - check Open Graph meta tags
+        if not images:
+            og_image = soup.find('meta', property='og:image')
+            twitter_image = soup.find('meta', attrs={'name': 'twitter:image'})
+
+            if og_image and og_image.get('content'):
+                img_url = urljoin(url, og_image['content'])
+                images.append({
+                    'url': img_url,
+                    'source_page': url
+                })
+                self.logger.debug(f"Using og:image for {url}")
+            elif twitter_image and twitter_image.get('content'):
+                img_url = urljoin(url, twitter_image['content'])
+                images.append({
+                    'url': img_url,
+                    'source_page': url
+                })
+                self.logger.debug(f"Using twitter:image for {url}")
+
         self.logger.debug(f"Found {len(images)} images on {url}")
         return images
 
@@ -913,14 +994,16 @@ class AsyncImageExtractor:
             return False
 
         # Skip very small images (likely icons)
-        width = img_tag.get('width', '0')
-        height = img_tag.get('height', '0')
-        try:
-            if width.isdigit() and height.isdigit():
-                if int(width) < 100 or int(height) < 100:
-                    return False
-        except:
-            pass
+        # Only check size if width/height attributes actually exist
+        width = img_tag.get('width')
+        height = img_tag.get('height')
+        if width and height:
+            try:
+                if width.isdigit() and height.isdigit():
+                    if int(width) < 100 or int(height) < 100:
+                        return False
+            except:
+                pass
 
         # Check for common exclusion patterns
         exclude_patterns = ['logo', 'icon', 'sprite', 'button', 'badge',
@@ -941,7 +1024,8 @@ class AsyncImageDownloader:
     """Downloads images with duplicate detection and batch processing."""
 
     def __init__(self, http_client: AsyncHTTPClient, output_dir: Path,
-                 duplicate_detector: DuplicateDetector, logger: ScraperLogger):
+                 duplicate_detector: DuplicateDetector, logger: ScraperLogger,
+                 person_filter: Optional['PersonDetectionFilter'] = None):
         """Initialize the image downloader.
 
         Args:
@@ -949,11 +1033,17 @@ class AsyncImageDownloader:
             output_dir: Directory to save images
             duplicate_detector: Duplicate detection instance
             logger: Logger instance
+            person_filter: Optional person detection filter (TASK-20)
         """
         self.http_client = http_client
         self.output_dir = output_dir
         self.duplicate_detector = duplicate_detector
         self.logger = logger
+        self.person_filter = person_filter
+
+        # TASK-20: Track filtered image hashes to avoid re-downloading
+        self.filtered_hashes: Set[str] = set()
+        self._load_filtered_hashes()
 
     async def download_image(self, img_url: str, designer: str) -> Optional[Dict[str, str]]:
         """Download an image if it's not a duplicate.
@@ -976,6 +1066,10 @@ class AsyncImageDownloader:
         if is_dup:
             return None
 
+        # TASK-20: Check if hash was previously filtered (no person detected)
+        if img_hash in self.filtered_hashes:
+            return None
+
         # Generate filename
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         ext = self._get_extension(img_url, headers.get('content-type', ''))
@@ -987,10 +1081,26 @@ class AsyncImageDownloader:
             with open(filepath, 'wb') as f:
                 f.write(image_data)
 
+            # TASK-20: Filter immediately after download
+            has_person = True
+            person_count = 0
+
+            if self.person_filter:
+                has_person, person_count = self.person_filter.detect_person(str(filepath))
+
+                if not has_person:
+                    # No person detected - delete and track hash
+                    filepath.unlink()  # Delete file
+                    self.filtered_hashes.add(img_hash)
+                    self._save_filtered_hashes()
+                    return None  # Don't count toward limit
+
             return {
                 'filename': filename,
                 'hash': img_hash,
-                'size': len(image_data)
+                'size': len(image_data),
+                'has_person': has_person,
+                'person_count': person_count
             }
         except Exception as e:
             self.logger.debug(f"Error saving image {filename}: {str(e)}")
@@ -1028,6 +1138,26 @@ class AsyncImageDownloader:
             return '.webp'
 
         return '.jpg'  # Default
+
+    def _load_filtered_hashes(self):
+        """Load filtered hashes from file (TASK-20)."""
+        filtered_file = self.output_dir / "filtered_hashes.json"
+        if filtered_file.exists():
+            try:
+                with open(filtered_file, 'r') as f:
+                    self.filtered_hashes = set(json.load(f))
+                self.logger.debug(f"Loaded {len(self.filtered_hashes)} filtered hashes")
+            except Exception as e:
+                self.logger.debug(f"Error loading filtered hashes: {e}")
+
+    def _save_filtered_hashes(self):
+        """Save filtered hashes to file (TASK-20)."""
+        filtered_file = self.output_dir / "filtered_hashes.json"
+        try:
+            with open(filtered_file, 'w') as f:
+                json.dump(list(self.filtered_hashes), f)
+        except Exception as e:
+            self.logger.debug(f"Error saving filtered hashes: {e}")
 
 
 # ============================================================================
@@ -1201,6 +1331,18 @@ class AsyncFashionScraper:
             self.logger.info(f"Processing {len(designers)} designers concurrently "
                            f"(max {self.max_concurrent_designers} at a time)")
 
+        # TASK-20: Initialize person filter if available
+        person_filter = None
+        if PERSON_FILTER_AVAILABLE:
+            try:
+                person_filter = PersonDetectionFilter(
+                    model_name="yolov8n.pt",
+                    confidence_threshold=0.25
+                )
+                self.logger.info("Person detection enabled (YOLO)")
+            except Exception as e:
+                self.logger.info(f"Person detection unavailable: {e}")
+
         # Initialize HTTP client
         async with AsyncHTTPClient(self.logger, self.rate_limiter, self.cache) as http_client:
             # Initialize scraping components
@@ -1208,7 +1350,8 @@ class AsyncFashionScraper:
             metadata_extractor = MetadataExtractor(self.logger)
             image_extractor = AsyncImageExtractor(http_client, self.logger)
             image_downloader = AsyncImageDownloader(
-                http_client, self.output_dir, self.duplicate_detector, self.logger
+                http_client, self.output_dir, self.duplicate_detector, self.logger,
+                person_filter=person_filter
             )
             source_logger = ImageSourceLogger(self.output_dir, self.logger)
 
@@ -1273,36 +1416,46 @@ class AsyncFashionScraper:
             image_downloader: Image downloader instance
             source_logger: Source logger instance
         """
-        # TASK-17 & TASK-19: Determine if we should use Playwright for this designer
-        # Priority: 1) Site config, 2) Manual --use-playwright argument
-        use_playwright_from_config = self.site_config.should_use_playwright(website_url)
-        use_playwright_from_arg = designer_name.lower() in self.use_playwright_for
-        use_playwright = use_playwright_from_config or use_playwright_from_arg
+        # TASK-19: Check if site has a product sitemap configured
+        sitemap_url = self.site_config.get_product_sitemap(website_url)
 
-        if use_playwright_from_config:
-            self.logger.info(f"Site config specifies Playwright for {urlparse(website_url).netloc}")
+        if sitemap_url:
+            # Use sitemap to get product URLs (bypasses crawling)
+            self.logger.info(f"Using sitemap for product discovery: {sitemap_url}")
+            product_pages = await self.site_config.fetch_sitemap_products(
+                sitemap_url, self.max_pages_per_site
+            )
+        else:
+            # TASK-17 & TASK-19: Determine if we should use Playwright for this designer
+            # Priority: 1) Site config, 2) Manual --use-playwright argument
+            use_playwright_from_config = self.site_config.should_use_playwright(website_url)
+            use_playwright_from_arg = designer_name.lower() in self.use_playwright_for
+            use_playwright = use_playwright_from_config or use_playwright_from_arg
 
-        if use_playwright:
-            if not PLAYWRIGHT_AVAILABLE:
-                self.logger.log_error(
-                    designer_name, website_url, "PlaywrightUnavailable",
-                    "Playwright requested but not installed. Install with: pip install playwright",
-                    website_url
-                )
-                return
+            if use_playwright_from_config:
+                self.logger.info(f"Site config specifies Playwright for {urlparse(website_url).netloc}")
 
-            self.logger.info(f"Using Playwright for JavaScript rendering (designer: {designer_name})")
-            # Use Playwright crawler for JavaScript-rendered sites
-            async with PlaywrightCrawler(self.logger) as pw_crawler:
-                product_pages = await pw_crawler.discover_product_pages(
+            if use_playwright:
+                if not PLAYWRIGHT_AVAILABLE:
+                    self.logger.log_error(
+                        designer_name, website_url, "PlaywrightUnavailable",
+                        "Playwright requested but not installed. Install with: pip install playwright",
+                        website_url
+                    )
+                    return
+
+                self.logger.info(f"Using Playwright for JavaScript rendering (designer: {designer_name})")
+                # Use Playwright crawler for JavaScript-rendered sites
+                async with PlaywrightCrawler(self.logger) as pw_crawler:
+                    product_pages = await pw_crawler.discover_product_pages(
+                        website_url, designer_name, self.max_pages_per_site
+                    )
+            else:
+                # Use regular HTML crawler
+                self.logger.info("Discovering product pages...")
+                product_pages = await crawler.discover_product_pages(
                     website_url, designer_name, self.max_pages_per_site
                 )
-        else:
-            # Use regular HTML crawler
-            self.logger.info("Discovering product pages...")
-            product_pages = await crawler.discover_product_pages(
-                website_url, designer_name, self.max_pages_per_site
-            )
 
         if not product_pages:
             self.logger.info("No product pages found")
@@ -1354,40 +1507,63 @@ class AsyncFashionScraper:
             soup = BeautifulSoup(content, 'lxml')
             metadata = metadata_extractor.extract_metadata(soup, page_url)
 
-            # Download images in batch
-            image_urls = [(img['url'], designer_name) for img in images]
-            download_results = await image_downloader.download_batch(image_urls)
-
-            # Log successful downloads
+            # TASK-16 + TASK-20: Process images in smaller batches to respect --max-images limit
+            # Download in batches of 15 to check counter between batches
+            BATCH_SIZE = 15
             page_downloaded = 0
             page_duplicates = 0
 
-            for img, result in zip(images, download_results):
-                # Check if we've hit the max images limit (use lock for thread-safe read)
+            # Prepare image URLs for processing
+            image_data = [(img['url'], designer_name, img) for img in images]
+
+            # Process in batches
+            for batch_start in range(0, len(image_data), BATCH_SIZE):
+                # Check limit before starting each batch
                 async with self.stats_lock:
                     if self.max_images and self.stats['images_downloaded'] >= self.max_images:
                         self.logger.info(f"    Reached max images limit ({self.max_images})")
-                        return
+                        break
 
-                if isinstance(result, dict) and result:
-                    # Image downloaded successfully
-                    # Use source_log_lock to protect source logger writes (TASK-15)
-                    async with self.source_log_lock:
-                        await source_logger.log_image(
-                            source_url=page_url,
-                            designer_name=designer_name,
-                            metadata=metadata,
-                            image_url=img['url'],
-                            local_filename=result['filename']
-                        )
-                    page_downloaded += 1
-                    async with self.stats_lock:
-                        self.stats['images_downloaded'] += 1
-                else:
-                    # Duplicate or failed
-                    page_duplicates += 1
-                    async with self.stats_lock:
-                        self.stats['duplicates_skipped'] += 1
+                # Get current batch
+                batch_end = min(batch_start + BATCH_SIZE, len(image_data))
+                batch = image_data[batch_start:batch_end]
+
+                # Download batch
+                image_urls = [(url, designer) for url, designer, _ in batch]
+                download_results = await image_downloader.download_batch(image_urls)
+
+                # Process results
+                for (url, designer, img), result in zip(batch, download_results):
+                    if isinstance(result, dict) and result:
+                        # Image downloaded successfully (has person if filter enabled)
+                        # Check limit BEFORE processing this image
+                        async with self.stats_lock:
+                            if self.max_images and self.stats['images_downloaded'] >= self.max_images:
+                                self.logger.info(f"    Reached max images limit ({self.max_images})")
+                                break
+
+                        # Use source_log_lock to protect source logger writes (TASK-15)
+                        async with self.source_log_lock:
+                            await source_logger.log_image(
+                                source_url=page_url,
+                                designer_name=designer_name,
+                                metadata=metadata,
+                                image_url=img['url'],
+                                local_filename=result['filename']
+                            )
+                        page_downloaded += 1
+                        async with self.stats_lock:
+                            self.stats['images_downloaded'] += 1
+                    else:
+                        # Duplicate, failed, or filtered (no person detected)
+                        page_duplicates += 1
+                        async with self.stats_lock:
+                            self.stats['duplicates_skipped'] += 1
+
+                # Check if we've hit the limit after processing this batch
+                async with self.stats_lock:
+                    if self.max_images and self.stats['images_downloaded'] >= self.max_images:
+                        break
 
             # Read stats with lock for display
             async with self.stats_lock:
