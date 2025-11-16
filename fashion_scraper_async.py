@@ -1096,6 +1096,18 @@ class AsyncImageExtractor:
 class AsyncImageDownloader:
     """Downloads images with duplicate detection and batch processing."""
 
+    @staticmethod
+    def sanitize_designer_name(designer: str) -> str:
+        """Convert designer name to filesystem-safe folder name (TASK-29).
+
+        Args:
+            designer: Designer name (e.g., "Anna Sui", "Stella McCartney")
+
+        Returns:
+            Sanitized name (e.g., "anna_sui", "stella_mccartney")
+        """
+        return designer.lower().replace(' ', '_').replace('-', '_')
+
     def __init__(self, http_client: AsyncHTTPClient, output_dir: Path,
                  duplicate_detector: DuplicateDetector, logger: ScraperLogger,
                  person_filter: Optional['PersonDetectionFilter'] = None):
@@ -1143,11 +1155,16 @@ class AsyncImageDownloader:
         if img_hash in self.filtered_hashes:
             return None
 
-        # Generate filename
+        # TASK-29: Create designer subdirectory
+        designer_folder_name = self.sanitize_designer_name(designer)
+        designer_folder = self.output_dir / designer_folder_name
+        designer_folder.mkdir(exist_ok=True)
+
+        # Generate filename (without designer prefix since folder indicates designer)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         ext = self._get_extension(img_url, headers.get('content-type', ''))
-        filename = f"{designer.lower().replace(' ', '_')}_{timestamp}{ext}"
-        filepath = self.output_dir / filename
+        filename = f"{timestamp}{ext}"
+        filepath = designer_folder / filename
 
         # Save image
         try:
@@ -1173,7 +1190,8 @@ class AsyncImageDownloader:
                 'hash': img_hash,
                 'size': len(image_data),
                 'has_person': has_person,
-                'person_count': person_count
+                'person_count': person_count,
+                'relative_path': f"{designer_folder_name}/{filename}"  # TASK-29: Include subdirectory
             }
         except Exception as e:
             self.logger.debug(f"Error saving image {filename}: {str(e)}")
@@ -1628,7 +1646,7 @@ class AsyncFashionScraper:
                                 designer_name=designer_name,
                                 metadata=metadata,
                                 image_url=img['url'],
-                                local_filename=result['filename']
+                                local_filename=result.get('relative_path', result['filename'])  # TASK-29: Use relative path
                             )
                         page_downloaded += 1
                         async with self.stats_lock:
