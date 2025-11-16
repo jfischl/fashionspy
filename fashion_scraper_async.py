@@ -1183,7 +1183,7 @@ class AsyncImageDownloader:
                     filepath.unlink()  # Delete file
                     self.filtered_hashes.add(img_hash)
                     self._save_filtered_hashes()
-                    return None  # Don't count toward limit
+                    return {'status': 'filtered'}  # TASK-23: Indicate filtered, not duplicate
 
             return {
                 'filename': filename,
@@ -1386,6 +1386,7 @@ class AsyncFashionScraper:
         self.stats = {
             'images_downloaded': 0,
             'duplicates_skipped': 0,
+            'images_filtered': 0,  # TASK-23: Track person filter rejections separately
             'errors_encountered': 0,
             'product_pages_processed': 0
         }
@@ -1631,6 +1632,13 @@ class AsyncFashionScraper:
 
                 # Process results
                 for (url, designer, img), result in zip(batch, download_results):
+                    # TASK-23: Check if image was filtered (no person detected)
+                    if isinstance(result, dict) and result.get('status') == 'filtered':
+                        # Person filter rejected this image
+                        async with self.stats_lock:
+                            self.stats['images_filtered'] += 1
+                        continue
+
                     if isinstance(result, dict) and result:
                         # Image downloaded successfully (has person if filter enabled)
                         # Check limit BEFORE processing this image
@@ -1652,7 +1660,7 @@ class AsyncFashionScraper:
                         async with self.stats_lock:
                             self.stats['images_downloaded'] += 1
                     else:
-                        # Duplicate, failed, or filtered (no person detected)
+                        # Duplicate or failed
                         page_duplicates += 1
                         async with self.stats_lock:
                             self.stats['duplicates_skipped'] += 1
@@ -1692,8 +1700,17 @@ class AsyncFashionScraper:
         self.logger.info("SCRAPING COMPLETE")
         self.logger.info("=" * 60)
         self.logger.info(f"Product pages processed: {self.stats['product_pages_processed']}")
-        self.logger.info(f"Total images downloaded: {self.stats['images_downloaded']}")
+        self.logger.info(f"Total images kept: {self.stats['images_downloaded']}")
         self.logger.info(f"Duplicates skipped: {self.stats['duplicates_skipped']}")
+
+        # TASK-23: Show person filter statistics if filtering was enabled
+        if self.stats['images_filtered'] > 0:
+            self.logger.info(f"Images filtered (no people): {self.stats['images_filtered']}")
+            total_checked = self.stats['images_downloaded'] + self.stats['images_filtered']
+            if total_checked > 0:
+                kept_pct = (self.stats['images_downloaded'] / total_checked) * 100
+                self.logger.info(f"Person detection accuracy: {kept_pct:.1f}% images with people")
+
         self.logger.info(f"Errors encountered: {self.stats['errors_encountered']}")
         self.logger.info(f"\nOutput directory: {self.output_dir.absolute()}")
         self.logger.info(f"Image source log: {self.source_logger_path}")
