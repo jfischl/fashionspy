@@ -27,14 +27,14 @@ class PersonDetectionFilter:
     def __init__(
         self,
         model_name: str = "yolov8n.pt",
-        confidence_threshold: float = 0.25,
+        confidence_threshold: float = 0.65,
         device: str = None
     ):
         """Initialize the person detection filter.
 
         Args:
             model_name: YOLO model to use (n=nano, s=small, m=medium, l=large, x=extra-large)
-            confidence_threshold: Minimum confidence score for person detection (0.0-1.0)
+            confidence_threshold: Minimum confidence score for person detection (0.0-1.0, default: 0.65)
             device: Device to run inference on ('cpu', 'cuda', 'mps', or None for auto-detect)
         """
         self.model_name = model_name
@@ -308,8 +308,8 @@ def main():
     parser.add_argument(
         '--confidence',
         type=float,
-        default=0.25,
-        help='Minimum confidence threshold for person detection (0.0-1.0, default: 0.25)'
+        default=0.65,
+        help='Minimum confidence threshold for person detection (0.0-1.0, default: 0.65)'
     )
     parser.add_argument(
         '--delete',

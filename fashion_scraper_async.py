@@ -1374,7 +1374,7 @@ class AsyncFashionScraper:
             try:
                 person_filter = PersonDetectionFilter(
                     model_name="yolov8n.pt",
-                    confidence_threshold=0.25
+                    confidence_threshold=0.65
                 )
                 self.logger.info("Person detection enabled (YOLO)")
             except Exception as e:
