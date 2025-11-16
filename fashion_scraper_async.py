@@ -246,15 +246,21 @@ class DesignerListReader:
 class DuplicateDetector:
     """Detects duplicate images using content-based hashing."""
 
-    def __init__(self, logger: ScraperLogger):
+    def __init__(self, logger: ScraperLogger, output_dir: Path = None):
         """Initialize the duplicate detector.
 
         Args:
             logger: Logger instance
+            output_dir: Output directory for hash persistence (TASK-26)
         """
         self.logger = logger
         self.seen_hashes: Set[str] = set()
         self.lock = asyncio.Lock()
+        self.output_dir = output_dir
+
+        # TASK-26: Load persisted hashes from previous runs
+        if self.output_dir:
+            self._load_hashes()
 
     def calculate_hash(self, image_data: bytes) -> str:
         """Calculate SHA-256 hash of image content.
@@ -289,6 +295,36 @@ class DuplicateDetector:
     def get_duplicate_count(self) -> int:
         """Get total number of unique images seen."""
         return len(self.seen_hashes)
+
+    def _load_hashes(self):
+        """Load duplicate hashes from file (TASK-26)."""
+        if not self.output_dir:
+            return
+
+        hash_file = self.output_dir / "duplicate_hashes.json"
+        if hash_file.exists():
+            try:
+                with open(hash_file, 'r') as f:
+                    self.seen_hashes = set(json.load(f))
+                self.logger.info(f"Loaded {len(self.seen_hashes)} duplicate hashes from previous runs")
+            except Exception as e:
+                self.logger.debug(f"Error loading duplicate hashes: {e}")
+
+    def _save_hashes(self):
+        """Save duplicate hashes to file (TASK-26)."""
+        if not self.output_dir:
+            return
+
+        hash_file = self.output_dir / "duplicate_hashes.json"
+        try:
+            with open(hash_file, 'w') as f:
+                json.dump(list(self.seen_hashes), f)
+        except Exception as e:
+            self.logger.debug(f"Error saving duplicate hashes: {e}")
+
+    def save_hashes_on_exit(self):
+        """Save hashes when scraping completes (TASK-26)."""
+        self._save_hashes()
 
 
 # ============================================================================
@@ -1213,20 +1249,25 @@ class ImageSourceLogger:
         """
         self.output_dir = output_dir
         self.logger = logger
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.log_path = output_dir / f"image_sources_{timestamp}.csv"
+        # TASK-27: Use single CSV file for all runs
+        self.log_path = output_dir / "image_sources.csv"
         self.lock = asyncio.Lock()
         self._init_csv()
 
     def _init_csv(self):
-        """Initialize the CSV file with headers."""
-        with open(self.log_path, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                'source_url', 'designer_name', 'product_name',
-                'product_category', 'price', 'timestamp',
-                'image_url', 'local_filename'
-            ])
+        """Initialize the CSV file with headers if it doesn't exist (TASK-27)."""
+        # Only write header if file doesn't exist
+        if not self.log_path.exists():
+            with open(self.log_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    'source_url', 'designer_name', 'product_name',
+                    'product_category', 'price', 'timestamp',
+                    'image_url', 'local_filename'
+                ])
+            self.logger.info(f"Created new CSV log: {self.log_path}")
+        else:
+            self.logger.info(f"Appending to existing CSV log: {self.log_path}")
 
     async def log_image(self, source_url: str, designer_name: str,
                   metadata: Dict[str, str], image_url: str,
@@ -1303,7 +1344,7 @@ class AsyncFashionScraper:
         # Initialize components
         self.logger = ScraperLogger(log_dir)
         self.reader = DesignerListReader(input_csv, self.logger)
-        self.duplicate_detector = DuplicateDetector(self.logger)
+        self.duplicate_detector = DuplicateDetector(self.logger, self.output_dir)  # TASK-26: Pass output_dir as Path
         self.rate_limiter = RateLimiter(requests_per_second)
         self.cache = ResponseCache(max_size=1000)
 
@@ -1626,6 +1667,9 @@ class AsyncFashionScraper:
 
     def _print_summary(self):
         """Print final summary statistics."""
+        # TASK-26: Save duplicate hashes before printing summary
+        self.duplicate_detector.save_hashes_on_exit()
+
         self.logger.info("\n" + "=" * 60)
         self.logger.info("SCRAPING COMPLETE")
         self.logger.info("=" * 60)
