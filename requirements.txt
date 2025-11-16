@@ -3,3 +3,8 @@ beautifulsoup4>=4.12.0
 lxml>=5.1.0
 aiohttp>=3.9.0
 aiodns>=3.1.0
+playwright>=1.0.0
+
+# Optional: Enhanced bot evasion for Playwright
+# Install with: pip install tf-playwright-stealth
+# tf-playwright-stealth>=1.2.0

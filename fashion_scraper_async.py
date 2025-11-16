@@ -16,7 +16,7 @@ import os
 import sys
 import time
 import warnings
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Set
@@ -735,6 +735,19 @@ class SiteConfig:
         site_config = self.get_site_config(url)
         return site_config.get('max_pages', default)
 
+    def get_max_depth(self, url: str, default: int = 2) -> int:
+        """Get maximum crawl depth for a specific site.
+
+        Args:
+            url: URL to get max depth for
+            default: Default max depth if not configured (2 = categories + products)
+
+        Returns:
+            Maximum depth for multi-level crawling
+        """
+        site_config = self.get_site_config(url)
+        return site_config.get('max_depth', default)
+
     def get_product_selectors(self, url: str) -> Dict[str, str]:
         """Get custom product selectors for a specific site.
 
@@ -825,20 +838,22 @@ class SiteConfig:
 class AsyncWebCrawler:
     """Discovers product pages on fashion websites using async requests."""
 
-    def __init__(self, http_client: AsyncHTTPClient, logger: ScraperLogger):
+    def __init__(self, http_client: AsyncHTTPClient, logger: ScraperLogger, site_config=None):
         """Initialize the web crawler.
 
         Args:
             http_client: Async HTTP client
             logger: Logger instance
+            site_config: Optional SiteConfig instance
         """
         self.http_client = http_client
         self.logger = logger
+        self.site_config = site_config
         self.visited_urls: Set[str] = set()
 
     async def discover_product_pages(self, base_url: str, designer: str,
                                      max_pages: int = 20) -> List[str]:
-        """Discover product pages from a website.
+        """Discover product pages from a website using multi-level crawling (TASK-22).
 
         Args:
             base_url: Base URL of the website
@@ -848,19 +863,28 @@ class AsyncWebCrawler:
         Returns:
             List of product page URLs
         """
+        # TASK-22: Multi-level crawling with depth tracking
+        max_depth = self.site_config.get_max_depth(base_url, default=2) if self.site_config else 2
         product_pages = []
-        to_visit = [base_url]
+
+        # BFS queue with (url, depth) tuples
+        queue = deque([(base_url, 0)])
+        visited = set()
         base_domain = urlparse(base_url).netloc
-        max_visits = 30  # Limit total pages visited
+        max_visits = max_pages * 5  # Allow more visits for multi-level crawling
 
-        while to_visit and len(product_pages) < max_pages and len(self.visited_urls) < max_visits:
-            url = to_visit.pop(0)
+        self.logger.info(f"Starting multi-level crawl (max_depth={max_depth}, max_pages={max_pages})")
 
-            if url in self.visited_urls:
+        while queue and len(product_pages) < max_pages and len(visited) < max_visits:
+            url, depth = queue.popleft()
+
+            # Skip if already visited or exceeded depth limit
+            if url in visited or depth > max_depth:
                 continue
 
-            self.visited_urls.add(url)
+            visited.add(url)
 
+            # Fetch page content
             result = await self.http_client.get(url)
             if not result:
                 continue
@@ -869,17 +893,22 @@ class AsyncWebCrawler:
             soup = BeautifulSoup(content, 'lxml')
 
             # Check if this is a product page
-            if self._is_product_page(soup, url):
+            is_product = self._is_product_page(soup, url)
+
+            if is_product:
                 product_pages.append(url)
-                self.logger.info(f"  Found product page: {url[:80]}...")
+                self.logger.info(f"  Found product page (depth={depth}): {url[:80]}...")
+                # Don't crawl deeper from product pages
+            else:
+                # Category/listing page - extract links and add to queue with depth+1
+                new_links = self._extract_links(soup, base_url, base_domain)
+                self.logger.debug(f"  Category page (depth={depth}): found {len(new_links)} links from {url[:60]}...")
 
-            # Find more links to explore
-            new_links = self._extract_links(soup, base_url, base_domain)
-            for link in new_links[:20]:
-                if link not in self.visited_urls and len(to_visit) < 20:
-                    to_visit.append(link)
+                for link in new_links[:50]:  # Limit links per page
+                    if link not in visited:
+                        queue.append((link, depth + 1))
 
-        self.logger.info(f"Discovered {len(product_pages)} product pages (visited {len(self.visited_urls)} pages total)")
+        self.logger.info(f"Discovered {len(product_pages)} product pages (visited {len(visited)} pages total, max_depth={max_depth})")
         return product_pages
 
     def _is_product_page(self, soup: BeautifulSoup, url: str) -> bool:
@@ -1354,7 +1383,7 @@ class AsyncFashionScraper:
         # Initialize HTTP client
         async with AsyncHTTPClient(self.logger, self.rate_limiter, self.cache) as http_client:
             # Initialize scraping components
-            crawler = AsyncWebCrawler(http_client, self.logger)
+            crawler = AsyncWebCrawler(http_client, self.logger, self.site_config)
             metadata_extractor = MetadataExtractor(self.logger)
             image_extractor = AsyncImageExtractor(http_client, self.logger)
             image_downloader = AsyncImageDownloader(
@@ -1454,9 +1483,10 @@ class AsyncFashionScraper:
 
                 self.logger.info(f"Using Playwright for JavaScript rendering (designer: {designer_name})")
                 # Use Playwright crawler for JavaScript-rendered sites
+                site_cfg = self.site_config.get_site_config(website_url) if self.site_config else None
                 async with PlaywrightCrawler(self.logger) as pw_crawler:
                     product_pages = await pw_crawler.discover_product_pages(
-                        website_url, designer_name, self.max_pages_per_site
+                        website_url, designer_name, self.max_pages_per_site, site_config=site_cfg
                     )
             else:
                 # Use regular HTML crawler
