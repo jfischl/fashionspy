@@ -107,14 +107,18 @@
 
   "www.versace.com": {
     "strategy": "playwright",
+    "start_url": "https://www.versace.com/us/en/women/clothing/",
     "wait_for": ".product-grid, .pdp-container",
     "product_selectors": {
       "price": ".price-sales, [class*='price']",
       "images": ".product-image img",
       "name": ".product-name"
     },
+    "url_patterns": ["/women/", "/men/", "/bags/", "/shoes/", "/clothing/", "/accessories/", "-p-"],
     "rate_limit": 2.0,
-    "scroll_to_load": true
+    "scroll_to_load": true,
+    "max_pages": 50,
+    "max_depth": 3
   },
 
   "us.burberry.com": {
