@@ -9,6 +9,10 @@ playwright>=1.0.0
 ultralytics>=8.0.0
 torch>=2.0.0
 
+# Perceptual hashing for near-duplicate detection (TASK-28)
+imagehash>=4.3.0
+Pillow>=10.0.0
+
 # Optional: Enhanced bot evasion for Playwright
 # Install with: pip install tf-playwright-stealth
 # tf-playwright-stealth>=1.2.0
