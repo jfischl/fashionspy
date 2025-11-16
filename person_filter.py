@@ -18,25 +18,39 @@ from typing import List, Dict, Tuple
 from datetime import datetime
 
 from ultralytics import YOLO
+import torch
 
 
 class PersonDetectionFilter:
     """Filters images based on person detection using YOLO."""
 
-    def __init__(self, model_name: str = "yolov8n.pt", confidence_threshold: float = 0.25):
+    def __init__(
+        self,
+        model_name: str = "yolov8n.pt",
+        confidence_threshold: float = 0.25,
+        device: str = None
+    ):
         """Initialize the person detection filter.
 
         Args:
             model_name: YOLO model to use (n=nano, s=small, m=medium, l=large, x=extra-large)
             confidence_threshold: Minimum confidence score for person detection (0.0-1.0)
+            device: Device to run inference on ('cpu', 'cuda', 'mps', or None for auto-detect)
         """
         self.model_name = model_name
         self.confidence_threshold = confidence_threshold
         self.logger = self._setup_logging()
 
+        # Determine device
+        self.device = self._select_device(device)
+        self.logger.info(f"Using device: {self.device}")
+
         # Initialize YOLO model
         self.logger.info(f"Loading YOLO model: {model_name}")
         self.model = YOLO(model_name)
+
+        # Move model to selected device
+        self.model.to(self.device)
 
         # COCO class ID for 'person' is 0
         self.person_class_id = 0
@@ -49,6 +63,43 @@ class PersonDetectionFilter:
             'images_deleted': 0,
             'errors': 0
         }
+
+    def _select_device(self, device: str = None) -> str:
+        """Select the best available device for inference.
+
+        Args:
+            device: User-specified device ('cpu', 'cuda', 'mps', or None for auto-detect)
+
+        Returns:
+            Device string to use ('cpu', 'cuda', or 'mps')
+        """
+        if device is not None:
+            # User explicitly specified a device
+            device_lower = device.lower()
+            if device_lower == 'cuda':
+                if torch.cuda.is_available():
+                    return 'cuda'
+                else:
+                    self.logger.warning("CUDA requested but not available, falling back to CPU")
+                    return 'cpu'
+            elif device_lower == 'mps':
+                if torch.backends.mps.is_available():
+                    return 'mps'
+                else:
+                    self.logger.warning("MPS requested but not available, falling back to CPU")
+                    return 'cpu'
+            elif device_lower == 'cpu':
+                return 'cpu'
+            else:
+                self.logger.warning(f"Unknown device '{device}', falling back to auto-detect")
+
+        # Auto-detect best available device
+        if torch.cuda.is_available():
+            return 'cuda'
+        elif torch.backends.mps.is_available():
+            return 'mps'
+        else:
+            return 'cpu'
 
     def _setup_logging(self) -> logging.Logger:
         """Setup logging for the filter."""
@@ -82,8 +133,8 @@ class PersonDetectionFilter:
             Tuple of (has_person, person_count)
         """
         try:
-            # Run inference
-            results = self.model(image_path, verbose=False)
+            # Run inference on the specified device
+            results = self.model(image_path, verbose=False, device=self.device)
 
             # Count persons detected above confidence threshold
             person_count = 0
@@ -274,13 +325,21 @@ def main():
         '--csv',
         help='Path to image source CSV file (auto-detected if not specified)'
     )
+    parser.add_argument(
+        '--device',
+        choices=['cpu', 'cuda', 'mps', 'auto'],
+        default='auto',
+        help='Device to run inference on (cpu, cuda, mps, or auto for auto-detect, default: auto)'
+    )
 
     args = parser.parse_args()
 
     # Initialize filter
+    device = None if args.device == 'auto' else args.device
     filter_instance = PersonDetectionFilter(
         model_name=args.model,
-        confidence_threshold=args.confidence
+        confidence_threshold=args.confidence,
+        device=device
     )
 
     # Run filtering
@@ -288,6 +347,7 @@ def main():
     print("Person Detection Filter (YOLO-based)")
     print("=" * 60)
     print(f"Model: {args.model}")
+    print(f"Device: {filter_instance.device}")
     print(f"Confidence threshold: {args.confidence}")
     print(f"Delete mode: {'ENABLED' if args.delete else 'DISABLED (dry-run)'}")
     print(f"Update CSV: {'NO' if args.no_update_csv else 'YES'}")

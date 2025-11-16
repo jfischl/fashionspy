@@ -5,6 +5,10 @@ aiohttp>=3.9.0
 aiodns>=3.1.0
 playwright>=1.0.0
 
+# YOLO person detection (TASK-20)
+ultralytics>=8.0.0
+torch>=2.0.0
+
 # Optional: Enhanced bot evasion for Playwright
 # Install with: pip install tf-playwright-stealth
 # tf-playwright-stealth>=1.2.0
